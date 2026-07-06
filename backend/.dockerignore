@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+.git/
+.gitignore
+*.sqlite3
+media/*
+logs/*
+staticfiles/*
+.env
+*.md
+.pytest_cache/
+htmlcov/
+.coverage

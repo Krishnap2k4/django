@@ -1,0 +1,9 @@
+# Production dependencies
+-r base.txt
+
+# =============================================================
+# Production server & monitoring
+# =============================================================
+# gunicorn already in base.txt
+whitenoise==6.9.0
+sentry-sdk==2.29.1
