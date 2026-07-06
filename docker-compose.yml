@@ -1,15 +1,28 @@
+# ============================================================
+# TaskFlow — Full Docker Compose (All Services)
+# ============================================================
+# Usage:
+#   Development:  docker compose up -d
+#   Production:   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#   Logs:         docker compose logs -f web
+#   Shell:        docker compose exec web python manage.py shell
+# ============================================================
+
 services:
+  # --------------------------------------------------------
+  # MySQL 8.0 — Primary Database
+  # --------------------------------------------------------
   mysql:
     image: mysql:8.0
     container_name: taskflow_mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: taskflow_pass
-      MYSQL_DATABASE: taskflow_db
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-taskflow_pass}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-taskflow_db}
       MYSQL_CHARSET: utf8mb4
       MYSQL_COLLATION: utf8mb4_unicode_ci
     ports:
-      - "3307:3306"
+      - "${MYSQL_PORT:-3307}:3306"
     volumes:
       - mysql_data:/var/lib/mysql
       - ./docker/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -24,18 +37,23 @@ services:
       --slow-query-log=1
       --long-query-time=2
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-ptaskflow_pass"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_PASSWORD:-taskflow_pass}"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 30s
+    networks:
+      - taskflow_net
 
+  # --------------------------------------------------------
+  # Redis 7 — Cache + Celery Broker
+  # --------------------------------------------------------
   redis:
     image: redis:7-alpine
     container_name: taskflow_redis
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     command: >
@@ -49,9 +67,137 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - taskflow_net
 
+  # --------------------------------------------------------
+  # Django Web Server (Development: runserver with hot-reload)
+  # --------------------------------------------------------
+  web:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        ENVIRONMENT: development
+    container_name: taskflow_web
+    restart: unless-stopped
+    command: >
+      bash -c "
+        bash /app/entrypoint.sh &&
+        python manage.py runserver 0.0.0.0:8000
+      "
+    volumes:
+      - ./backend:/app                # Hot-reload: code changes reflect instantly
+      - media_data:/app/media
+      - static_data:/app/staticfiles
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.development
+      - MYSQL_HOST=mysql              # Docker service name, not localhost
+      - MYSQL_PORT=3306               # Internal container port, not mapped port
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - taskflow_net
+
+  # --------------------------------------------------------
+  # Celery Worker — Async Task Processing
+  # --------------------------------------------------------
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        ENVIRONMENT: development
+    container_name: taskflow_celery_worker
+    restart: unless-stopped
+    command: >
+      bash -c "
+        bash /app/entrypoint.sh &&
+        celery -A config worker
+        --loglevel=info
+        --concurrency=2
+        -Q default,notifications
+      "
+    volumes:
+      - ./backend:/app
+      - media_data:/app/media
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.development
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - taskflow_net
+
+  # --------------------------------------------------------
+  # Celery Beat — Periodic Task Scheduler
+  # --------------------------------------------------------
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        ENVIRONMENT: development
+    container_name: taskflow_celery_beat
+    restart: unless-stopped
+    command: >
+      bash -c "
+        bash /app/entrypoint.sh &&
+        celery -A config beat
+        --loglevel=info
+        --scheduler django_celery_beat.schedulers:DatabaseScheduler
+      "
+    volumes:
+      - ./backend:/app
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.development
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - taskflow_net
+
+# ============================================================
+# Volumes (persistent data)
+# ============================================================
 volumes:
   mysql_data:
     driver: local
   redis_data:
     driver: local
+  media_data:
+    driver: local
+  static_data:
+    driver: local
+
+# ============================================================
+# Network
+# ============================================================
+networks:
+  taskflow_net:
+    driver: bridge
